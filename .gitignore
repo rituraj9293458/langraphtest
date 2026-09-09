@@ -1,0 +1,19 @@
+# Python virtual environment
+backend/venv/
+
+# Python cache
+backend/__pycache__/
+backend/**/*.pyc
+
+# SQLite database
+backend/*.db
+
+# Node dependencies
+langgraph-chatbot/node_modules/
+
+# Vite build output
+langgraph-chatbot/dist/
+
+# Environment variables
+.env
+.env.*
