@@ -1,29 +1,31 @@
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import time
+
+# --- LangGraph & LangChain Imports ---
 from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
 
 
 # --------------------------------------------------
-# FastAPI application
+# FastAPI Application Setup
 # --------------------------------------------------
 
-app = FastAPI()
-
-
-# --------------------------------------------------
-# Allow React frontend to communicate with FastAPI
-# --------------------------------------------------
+app = FastAPI(title="LangGraph Chatbot API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5174",
         "http://127.0.0.1:5174",
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -32,15 +34,16 @@ app.add_middleware(
 
 
 # --------------------------------------------------
-# Request structure
+# Request & Response Data Schemas
 # --------------------------------------------------
 
 class ChatRequest(BaseModel):
     message: str
+    thread_id: str = "default_session"  # Used by LangGraph Checkpointer for persistence
 
 
 # --------------------------------------------------
-# Ollama LLM
+# 1. LLM & Tools Setup
 # --------------------------------------------------
 
 llm = ChatOllama(
@@ -48,59 +51,88 @@ llm = ChatOllama(
     temperature=0
 )
 
+# Define sample tool(s) for learning LangGraph Tool integration
+@tool
+def get_current_time() -> str:
+    """Returns the current date and time in ISO format."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# --------------------------------------------------
-# Prompt
-# --------------------------------------------------
-
-prompt = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a helpful AI assistant."
-    ),
-    MessagesPlaceholder(
-        variable_name="messages"
-    )
-])
+tools = [get_current_time]
+# Bind tools to the LLM so it knows about available function signatures
+llm_with_tools = llm.bind_tools(tools)
 
 
 # --------------------------------------------------
-# LangChain chain
+# 2. Graph Nodes & Logic
 # --------------------------------------------------
 
-chain = prompt | llm
+def chatbot_node(state: MessagesState):
+    """
+    Main node that invokes the model with current message history state.
+    Returns the new AI message to be appended to state['messages'].
+    """
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
 
 
 # --------------------------------------------------
-# Simple GET route for testing
+# 3. Build & Compile LangGraph StateGraph
+# --------------------------------------------------
+
+builder = StateGraph(MessagesState)
+
+# Add nodes to the graph
+builder.add_node("chatbot", chatbot_node)
+builder.add_node("tools", ToolNode(tools))  # Prebuilt tool node to execute tool calls
+
+# Define graph flow & conditional edges
+builder.add_edge(START, "chatbot")
+# tools_condition checks if LLM requested a tool call; if so, routes to "tools", else routes to END
+builder.add_conditional_edges("chatbot", tools_condition)
+builder.add_edge("tools", "chatbot")  # Loop tool result back to chatbot node
+
+
+# --------------------------------------------------
+# 4. Checkpointer & Persistence Setup
+# --------------------------------------------------
+# MemorySaver stores state in memory per thread_id.
+# For production, replace with AsyncSqliteSaver or PostgresSaver.
+memory = MemorySaver()
+
+# Compile graph with checkpointer enabled
+graph = builder.compile(checkpointer=memory)
+
+
+# --------------------------------------------------
+# API Routes
 # --------------------------------------------------
 
 @app.get("/")
 def home():
     return {
-        "message": "Backend is running"
+        "message": "LangGraph Backend is running",
+        "status": "online"
     }
 
 
-# --------------------------------------------------
-# Chat endpoint with streaming
-# --------------------------------------------------
-
 @app.post("/chat")
 async def chat(request: ChatRequest):
+    """
+    Streams tokens back to client while persisting state via LangGraph Checkpointer.
+    """
+    # Config object passing the thread_id to the checkpointer
+    config = {"configurable": {"thread_id": request.thread_id}}
 
     async def generate():
-
-        async for chunk in chain.astream({
-            "messages": [
-                ("human", request.message)
-            ]
-        }):
-            time.sleep(0.1);
-
-            if chunk.content:
-                yield chunk.content
-
+        # stream_mode="messages" streams individual message chunks as they are generated by nodes
+        async for message_chunk, metadata in graph.astream(
+            {"messages": [HumanMessage(content=request.message)]},
+            config=config,
+            stream_mode="messages"
+        ):
+            # Only stream tokens generated by the AI assistant node
+            if isinstance(message_chunk, AIMessage) and message_chunk.content:
+                yield message_chunk.content
 
     return StreamingResponse(
         generate(),
