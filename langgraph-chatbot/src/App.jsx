@@ -6,6 +6,13 @@ function App() {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [threadId, setThreadId] = useState("session-1");
+
+  const startNewThread = () => {
+    const newId = "session-" + Math.random().toString(36).substring(2, 9);
+    setThreadId(newId);
+    setMessages([]);
+  };
 
   const sendMessage = async () => {
     if (!message.trim() || loading) return;
@@ -44,6 +51,7 @@ function App() {
         },
         body: JSON.stringify({
           message: userMessage,
+          thread_id: threadId,
         }),
       });
 
@@ -134,7 +142,18 @@ function App() {
     <div className="app">
       <div className="chat-container">
 
-        <h1>LangGraph Chatbot</h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <div>
+            <h1 style={{ margin: 0 }}>LangGraph Chatbot</h1>
+            <small style={{ color: "#888" }}>Thread ID: {threadId}</small>
+          </div>
+          <button 
+            onClick={startNewThread}
+            style={{ padding: "6px 12px", fontSize: "0.85rem", background: "#4a5568", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+          >
+            New Thread
+          </button>
+        </div>
 
         <div className="messages">
 
